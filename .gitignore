@@ -1,0 +1,14 @@
+# 证书与私钥（绝不入库）
+cert/
+*.pfx
+passphrase.txt
+
+# 分享目录（用户文件，不入库）
+share/
+
+# 日志
+*.log
+
+# 系统/编辑器杂项
+Thumbs.db
+.DS_Store
