@@ -7,6 +7,7 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 const CERT_DIR = path.join(__dirname, 'cert');
 const SHARE_DIR = path.join(__dirname, 'share'); // 手机可下载的分享目录
@@ -17,6 +18,18 @@ const LISTEN_PORT = 8443;
 
 function log(msg) {
   console.log(`[remote-proxy ${new Date().toISOString()}] ${msg}`);
+}
+
+// 是否对响应做 gzip 压缩：压缩 JSON/文本响应（如 5MB 的会话历史），
+// 解决手机经低速中继传输超时（客户端 30 秒写死超时）导致的加载失败。
+// 注意：DSH 的大响应多为 chunked（无 content-length），因此按 content-type 判断，不依赖长度。
+function shouldGzip(req, proxyRes) {
+  if (!(req.headers['accept-encoding'] || '').includes('gzip')) return false;
+  if (proxyRes.headers['content-encoding']) return false;
+  const ct = proxyRes.headers['content-type'] || '';
+  if (ct.includes('event-stream')) return false; // SSE 流式不压缩
+  if (!/json|text|javascript/.test(ct)) return false;
+  return true;
 }
 
 let tlsOptions;
@@ -76,8 +89,16 @@ function handleRequest(req, res) {
     headers: req.headers, // 保留原 Host 头，DSH 信任围栏按 Host 校验
   }, (proxyRes) => {
     proxyRes.on('error', () => res.destroy());
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res);
+    if (shouldGzip(req, proxyRes)) {
+      const headers = { ...proxyRes.headers };
+      delete headers['content-length'];
+      headers['content-encoding'] = 'gzip';
+      res.writeHead(proxyRes.statusCode, headers);
+      proxyRes.pipe(zlib.createGzip()).pipe(res);
+    } else {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    }
   });
   proxyReq.on('error', (err) => {
     log(`后端请求失败: ${err.message}`);
