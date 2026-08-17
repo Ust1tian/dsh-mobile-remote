@@ -63,6 +63,11 @@ function handleRequest(req, res) {
     handleShare(req, res);
     return;
   }
+  // 客户端中途断开（手机浏览器常见行为）时，主动销毁后端请求，避免泄漏与进程崩溃
+  req.on('aborted', () => proxyReq.destroy());
+  res.on('error', () => {
+    /* 客户端断开导致的写入错误，忽略即可 */
+  });
   const proxyReq = http.request({
     host: BACKEND_HOST,
     port: BACKEND_PORT,
@@ -70,6 +75,7 @@ function handleRequest(req, res) {
     path: req.url,
     headers: req.headers, // 保留原 Host 头，DSH 信任围栏按 Host 校验
   }, (proxyRes) => {
+    proxyRes.on('error', () => res.destroy());
     res.writeHead(proxyRes.statusCode, proxyRes.headers);
     proxyRes.pipe(res);
   });
