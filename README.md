@@ -108,6 +108,49 @@ shell:startup
 
 下次登录自动启动代理。
 
+## DSH 自愈启动 + 开机自启（推荐）
+
+> 背景：DSH 更新后可能出现"双击图标打不开"（如 `dsh.cmd` 哈希路径失效、端口被旧实例占用、启动即退出等）。以下脚本让 DSH 启动具备自愈能力，并支持登录自动运行。
+
+### 文件说明
+
+| 文件 | 作用 |
+|---|---|
+| `start-dsh.ps1` | 自愈版启动脚本（部署到本机时改名为 `启动DSH.ps1` 并放 `E:\DSH\`） |
+| `start-dsh-silent.vbs` | 静默自启包装（隐藏窗口，供启动文件夹调用，改名 `启动DSH-静默.vbs`） |
+| `dsh-console.vbs` | 桌面"DSH 控制台"图标（只检测端口 + 开浏览器，不启动服务，改名 `DSH控制台.vbs`） |
+
+### 部署步骤
+
+1. **自愈启动脚本**：把 `start-dsh.ps1` 复制为 `E:\DSH\启动DSH.ps1`，桌面快捷方式指向：
+   ```
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\DSH\启动DSH.ps1"
+   ```
+   （脚本含 UTF-8 BOM，Windows PowerShell 5.1 可正常解析中文注释）
+
+2. **开机自启**：把 `start-dsh-silent.vbs` 复制为 `E:\DSH\启动DSH-静默.vbs`，再复制一份到启动文件夹：
+   ```powershell
+   # 打开启动文件夹
+   shell:startup
+   ```
+   登录后自动静默启动 DSH（无窗口、不弹浏览器）。
+
+3. **DSH 控制台图标**：把 `dsh-console.vbs` 复制为 `E:\DSH\DSH控制台.vbs`，桌面新建快捷方式：
+   ```
+   Target: wscript.exe
+   Args:   "E:\DSH\DSH控制台.vbs"
+   ```
+   双击只打开浏览器，服务未运行时弹窗提示。
+
+### 自愈能力
+
+- 启动前自检 `dsh.cmd` 是否存在、版本是否正常，异常自动回退 `npx @deepseek-ai/dsh web`
+- 检测到 3080 已被占用 → 不重复启动，直接开浏览器
+- 启动后 60 秒未就绪 → 自动重试一次，仍失败弹窗提示
+- 每次启动写入 `E:\DSH\启动日志.txt`，打不开时看日志定位原因
+
+> 脚本中的 `E:\DSH`、`E:\Codex_Project`、`127.0.0.1:3080` 为部署示例路径，请按本机实际调整。
+
 ---
 
 ## 安全提醒
