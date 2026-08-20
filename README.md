@@ -55,6 +55,8 @@ netsh interface portproxy add v4tov4 listenaddress=<蒲公英IP> listenport=443 
 netsh advfirewall firewall add rule name="DSH-Remote-443" dir=in action=allow protocol=TCP localport=443 remoteip=172.16.0.0/16
 ```
 
+> 上述命令已封装为 `setup-443.ps1`（建转发+防火墙，输出写日志），可直接管理员运行。
+
 ### 4. DSH 信任围栏：允许该 IP 的 /api 请求
 
 在 DSH 用户层补丁 `$DSH_HOME\.dsh\profiles\web\cordis.patch.yml` 追加（把 `<蒲公英IP>` 换成你的 IP）：
@@ -96,6 +98,17 @@ https://<蒲公英IP>
 - 网页目录树选择的"新建工作区"同样走这个 HTTPS 通道
 
 ---
+
+## 运维辅助脚本
+
+| 脚本 | 作用 | 用法 |
+|---|---|---|
+| `setup-443.ps1` | 建立 443 端口转发 + 防火墙放行 | 管理员运行一次 |
+| `rebind-portproxy.ps1` | 重建两条 portproxy 转发（虚拟 IP 变动/适配器重连后修复） | 管理员运行 |
+| `restart-proxy.ps1` | 停掉占用 8443 的旧代理并重新启动 | 管理员运行 |
+| `restart-iphlpsvc.ps1` | 重启 IP Helper 服务（portproxy 失效时修复） | 管理员运行 |
+
+> 脚本中的 `172.16.0.116` 为部署示例 IP，请按你的蒲公英虚拟 IP 修改；路径 `E:\DSH\remote-access` 按本机实际调整。
 
 ## 开机自启（可选）
 
