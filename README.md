@@ -107,8 +107,20 @@ https://<蒲公英IP>
 | `rebind-portproxy.ps1` | 重建两条 portproxy 转发（虚拟 IP 变动/适配器重连后修复） | 管理员运行 |
 | `restart-proxy.ps1` | 停掉占用 8443 的旧代理并重新启动 | 管理员运行 |
 | `restart-iphlpsvc.ps1` | 重启 IP Helper 服务（portproxy 失效时修复） | 管理员运行 |
+| `watch-portproxy.ps1` | 常驻监控：每 30 秒检测，蒲公英重连后自动重建转发 | 配合计划任务自动运行 |
+| `setup-watch-task.ps1` | 注册 DSH-PortProxy-Watch 计划任务（登录自启监控） | 管理员运行一次 |
 
 > 脚本中的 `172.16.0.116` 为部署示例 IP，请按你的蒲公英虚拟 IP 修改；路径 `E:\DSH\remote-access` 按本机实际调整。
+
+## 端口转发自动修复（推荐）
+
+蒲公英虚拟网卡重连后，`netsh portproxy` 的监听器可能丢失（规则还在但 443/3080 不监听），导致手机无法访问。解决方案：
+
+1. 管理员运行 `setup-watch-task.ps1` 注册计划任务 `DSH-PortProxy-Watch`
+2. 登录后自动常驻运行 `watch-portproxy.ps1`：每 30 秒检测一次，发现"网卡在线但 443 未监听"即自动重建转发
+3. 状态变化写入 `watch-portproxy.log`，便于排查
+
+手动验证：蒲公英重连后 30-60 秒内转发自动恢复，无需干预。
 
 ## 开机自启（可选）
 
