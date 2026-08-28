@@ -1,22 +1,28 @@
 ﻿# ============================================================
-#  DSH 端口转发自动修复（常驻监控）
+#  DSH 远程链路双守护（常驻监控）
 #  由计划任务以最高权限运行，无需用户干预
 # ------------------------------------------------------------
-#  背景：蒲公英虚拟网卡重连后，netsh portproxy 的监听器可能
-#  丢失（规则还在但 443/3080 不监听），导致手机无法访问。
-#  本脚本每 30 秒检测一次，发现"网卡在线但 443 未监听"
-#  即自动重建两条转发规则。
+#  守护内容：
+#  1) portproxy 转发守护：蒲公英/Tailscale 虚拟网卡重连后，
+#     netsh portproxy 监听器可能丢失，自动重建转发规则。
+#  2) 代理进程守护：检测 127.0.0.1:8443 无监听时，自动拉起
+#     HTTPS 反向代理（proxy.js），确保远程链路持续可用。
 # ------------------------------------------------------------
 #  由计划任务 DSH-PortProxy-Watch 调用，开机登录即启动，
 #  常驻循环运行（不会自动退出）。
 # ============================================================
 
 # ---------- 配置 ----------
-$vip           = '172.16.0.116'          # 蒲公英虚拟 IP（按实际修改）
+$vip           = '172.16.0.116'          # 蒲公英虚拟 IP
+$tsIP          = '100.114.252.11'        # Tailscale IP
 $intervalSec   = 30                       # 检测间隔（秒）
 $logFile       = 'E:\DSH\remote-access\watch-portproxy.log'
-$proxyPort     = 8443                     # 代理监听端口
+$proxyPort     = 8443                     # 代理监听端口（内部目标）
+$listenPort    = 443                      # 对外入口端口（手机访问）
 $dshPort       = 3080                     # DSH 本机端口
+$proxyJs       = 'E:\DSH\remote-access\proxy.js'
+$nodeBin       = 'D:\Program Files\nodejs\node.exe'
+$proxyLog      = 'E:\DSH\remote-access\proxy.log'
 
 # ---------- 日志（仅状态变化时写入，避免膨胀） ----------
 function Write-WatchLog {
@@ -25,66 +31,106 @@ function Write-WatchLog {
     try { Add-Content -Path $logFile -Value $line -Encoding UTF8 -ErrorAction Stop } catch {}
 }
 
-# ---------- 检测：蒲公英虚拟 IP 是否在网卡上 ----------
-function Test-VipOnline {
-    return [bool](Get-NetIPAddress -AddressFamily IPv4 -IPAddress $vip -ErrorAction SilentlyContinue)
+# ---------- 检测：指定 IP 是否在网卡上 ----------
+function Test-IpOnline {
+    param([string]$ip)
+    return [bool](Get-NetIPAddress -AddressFamily IPv4 -IPAddress $ip -ErrorAction SilentlyContinue)
 }
 
-# ---------- 检测：$vip:$proxyPort 是否处于监听 ----------
-function Test-ProxyListening {
-    $lines = netstat -ano | Select-String ("{0}:{1}\s+.*LISTENING" -f $vip, $proxyPort)
+# ---------- 检测：127.0.0.1:$proxyPort 是否处于监听（代理是否存活） ----------
+function Test-ProxyAlive {
+    $lines = netstat -ano | Select-String ("127\.0\.0\.1:{0}\s+.*LISTENING" -f $proxyPort)
     return [bool]$lines
 }
 
-# ---------- 重建两条 portproxy 转发 ----------
-function Rebuild-PortProxy {
-    # 先删除旧规则（忽略不存在错误）
-    netsh interface portproxy delete v4tov4 listenaddress=$vip listenport=$proxyPort 2>$null | Out-Null
-    netsh interface portproxy delete v4tov4 listenaddress=$vip listenport=$dshPort 2>$null | Out-Null
-    # 重建
-    netsh interface portproxy add v4tov4 listenaddress=$vip listenport=$proxyPort connectaddress=127.0.0.1 connectport=$proxyPort 2>$null | Out-Null
-    netsh interface portproxy add v4tov4 listenaddress=$vip listenport=$dshPort   connectaddress=127.0.0.1 connectport=$dshPort   2>$null | Out-Null
-    # 等待监听器生效
-    Start-Sleep -Seconds 3
-    if (Test-ProxyListening) {
-        Write-WatchLog "[修复] $vip 端口转发已重建，$proxyPort 监听恢复"
-        return $true
-    } else {
-        Write-WatchLog "[警告] 重建后 $proxyPort 仍未监听（可能需要重启 iphlpsvc 服务）"
-        return $false
+# ---------- 拉起代理进程（独立后台，日志重定向） ----------
+function Start-ProxyDaemon {
+    # 用 ProcessStartInfo 创建独立进程，彻底脱离本脚本进程树，避免被连带终止
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'cmd.exe'
+        $psi.Arguments = '/c start "DSH-Proxy" /min "' + $nodeBin + '" "' + $proxyJs + '" >> "' + $proxyLog + '" 2>&1'
+        $psi.WindowStyle = 'Hidden'
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        [System.Diagnostics.Process]::Start($psi) | Out-Null
+        Write-WatchLog "[代理] 已拉起 proxy.js（后台）"
+    } catch {
+        Write-WatchLog "[错误] 拉起代理失败: $($_.Exception.Message)"
     }
 }
 
+# ---------- 重建指定 IP 的 portproxy 转发（443 入口 + 8443 直连 + 3080） ----------
+function Rebuild-PortProxy {
+    param([string]$ip)
+    netsh interface portproxy delete v4tov4 listenaddress=$ip listenport=$listenPort 2>$null | Out-Null
+    netsh interface portproxy delete v4tov4 listenaddress=$ip listenport=$proxyPort 2>$null | Out-Null
+    netsh interface portproxy delete v4tov4 listenaddress=$ip listenport=$dshPort 2>$null | Out-Null
+    netsh interface portproxy add v4tov4 listenaddress=$ip listenport=$listenPort connectaddress=127.0.0.1 connectport=$proxyPort 2>$null | Out-Null
+    netsh interface portproxy add v4tov4 listenaddress=$ip listenport=$proxyPort connectaddress=127.0.0.1 connectport=$proxyPort 2>$null | Out-Null
+    netsh interface portproxy add v4tov4 listenaddress=$ip listenport=$dshPort   connectaddress=127.0.0.1 connectport=$dshPort   2>$null | Out-Null
+}
+
+# ---------- 检测：$ip:$listenPort 是否处于监听（对外入口转发是否生效） ----------
+function Test-IpListening {
+    param([string]$ip)
+    $lines = netstat -ano | Select-String ("{0}:{1}\s+.*LISTENING" -f $ip, $listenPort)
+    return [bool]$lines
+}
+
 # ---------- 主循环 ----------
-Write-WatchLog "========== 端口转发监控启动（间隔 ${intervalSec}s，VIP=$vip）=========="
-$lastState = 'init'
+Write-WatchLog "========== 双守护启动（间隔 ${intervalSec}s，VIP=$vip TS=$tsIP）=========="
+$stateProxy = 'init'
+$stateVip   = 'init'
+$stateTs    = 'init'
 
 while ($true) {
-    # 1) 蒲公英网卡不在线 → 无需修复，等待
-    if (-not (Test-VipOnline)) {
-        if ($lastState -ne 'vpn-down') {
-            Write-WatchLog "[状态] 蒲公英网卡不在线，等待重连..."
-            $lastState = 'vpn-down'
+    # ── 守护1：代理进程（127.0.0.1:8443） ──
+    if (Test-ProxyAlive) {
+        if ($stateProxy -ne 'ok') { Write-WatchLog "[代理] 运行正常"; $stateProxy = 'ok' }
+    } else {
+        if ($stateProxy -ne 'fixing') {
+            Write-WatchLog "[代理] 127.0.0.1:$proxyPort 未监听，准备拉起"
+            $stateProxy = 'fixing'
         }
-        Start-Sleep -Seconds $intervalSec
-        continue
+        Start-ProxyDaemon
+        Start-Sleep -Seconds 3
+        if (Test-ProxyAlive) { $stateProxy = 'ok'; Write-WatchLog "[代理] 拉起成功" }
     }
 
-    # 2) 网卡在线且转发正常 → 等待
-    if (Test-ProxyListening) {
-        if ($lastState -ne 'ok') {
-            Write-WatchLog "[状态] 转发正常"
-            $lastState = 'ok'
+    # ── 守护2a：蒲公英转发（网卡在线但转发丢失 → 重建） ──
+    if (Test-IpOnline $vip) {
+        if (Test-IpListening $vip) {
+            if ($stateVip -ne 'ok') { Write-WatchLog "[蒲公英] 转发正常"; $stateVip = 'ok' }
+        } else {
+            if ($stateVip -ne 'fixing') {
+                Write-WatchLog "[蒲公英] 网卡在线但 $listenPort 未监听，重建转发"
+                $stateVip = 'fixing'
+            }
+            Rebuild-PortProxy $vip
+            Start-Sleep -Seconds 3
+            if (Test-IpListening $vip) { $stateVip = 'ok'; Write-WatchLog "[蒲公英] 转发重建成功" }
         }
-        Start-Sleep -Seconds $intervalSec
-        continue
+    } else {
+        if ($stateVip -ne 'down') { Write-WatchLog "[蒲公英] 网卡不在线，等待"; $stateVip = 'down' }
     }
 
-    # 3) 网卡在线但监听丢失 → 自动修复
-    if ($lastState -ne 'fixing') {
-        Write-WatchLog "[检测] 网卡在线但 $proxyPort 未监听，开始自动修复"
-        $lastState = 'fixing'
+    # ── 守护2b：Tailscale 转发 ──
+    if (Test-IpOnline $tsIP) {
+        if (Test-IpListening $tsIP) {
+            if ($stateTs -ne 'ok') { Write-WatchLog "[Tailscale] 转发正常"; $stateTs = 'ok' }
+        } else {
+            if ($stateTs -ne 'fixing') {
+                Write-WatchLog "[Tailscale] 网卡在线但 $listenPort 未监听，重建转发"
+                $stateTs = 'fixing'
+            }
+            Rebuild-PortProxy $tsIP
+            Start-Sleep -Seconds 3
+            if (Test-IpListening $tsIP) { $stateTs = 'ok'; Write-WatchLog "[Tailscale] 转发重建成功" }
+        }
+    } else {
+        if ($stateTs -ne 'down') { Write-WatchLog "[Tailscale] 网卡不在线，等待"; $stateTs = 'down' }
     }
-    Rebuild-PortProxy | Out-Null
+
     Start-Sleep -Seconds $intervalSec
 }
